@@ -2,20 +2,7 @@
 
 A tabular Q-learning agent for a hand-built Gymnasium environment, `MinionRush-v5`.
 
-The environment is an endless-runner track: three lanes, one row of obstacles at
-a time. Each episode is exactly one row, so every decision is a single
-state-action choice with no credit assignment to untangle — which means the
-right answer is computable in closed form and the learned table can be checked
-against it cell by cell. That is the whole point of modelling this small.
-
 ![The visualiser running the converged policy](docs/visualiser.png)
-
-_The converged table (episode 33,000,000) playing itself. Left: the checkpoint
-ladder, red "bad" giving way to green "safe", with the selected checkpoint's
-metrics underneath — all 98505 cells visited, no unsafe states, no needless
-jumps. Right: the live decision — the incoming row is `v m b`, state 5164
-(lane 2, code 786), and the Q-grid ranks all 15 actions with `L1` at 6.00
-picked. Swiping one lane left costs 1.0 and lands on the bystander for +5._
 
 ```bash
 python train.py                     # -> minion_q.npy
