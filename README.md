@@ -1,6 +1,8 @@
 # Minion Rush Agent
 
-A tabular Q-learning agent for a hand-built Gymnasium environment, `MinionRush-v5`.
+A Minion Rush agent built with reinforcement learning (Q-learning), modelling
+obstacles, rewards and collection in a hand-built Gymnasium environment,
+`MinionRush-v5`.
 
 ![The visualiser running the converged policy](docs/visualiser.png)
 
