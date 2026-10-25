@@ -1,0 +1,1650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minion Rush — watching a Q-table learn</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: rgba(14, 20, 40, 0.82);
+    --line: rgba(255, 255, 255, 0.12);
+    --ink: #eef2ff;
+    --dim: #93a0c8;
+    --good: #5ce1a6;
+    --bad: #ff6b81;
+    --accent: #ffd34d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body {
+    font: 13px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+  }
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  .panel {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    backdrop-filter: blur(12px);
+    padding: 12px 14px;
+  }
+
+  /* ---- left: episode picker ---- */
+  #picker { top: 14px; left: 14px; width: 272px; max-height: calc(100vh - 28px); overflow: auto; }
+  h1 { font-size: 14px; margin: 0 0 2px; letter-spacing: .2px; }
+  .sub { color: var(--dim); font-size: 11px; margin-bottom: 10px; }
+  .eps { display: grid; gap: 4px; }
+  .ep {
+    display: grid; grid-template-columns: 56px 1fr auto; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent; background: rgba(255,255,255,.03);
+    font-variant-numeric: tabular-nums;
+  }
+  .ep:hover { background: rgba(255,255,255,.07); }
+  .ep.sel { border-color: var(--accent); background: rgba(255,211,77,.12); }
+  .ep b { font-weight: 600; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 99px; }
+  .tag.safe { background: rgba(92,225,166,.16); color: var(--good); }
+  .tag.unsafe { background: rgba(255,107,129,.16); color: var(--bad); }
+
+  /* ---- right: live readout ---- */
+  #hud { top: 14px; right: 14px; width: 284px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+  .row span:last-child { font-variant-numeric: tabular-nums; }
+  .k { color: var(--dim); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+  .track { font-family: ui-monospace, Menlo, monospace; letter-spacing: 3px; font-size: 15px; }
+  .qgrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 6px; }
+  .q { text-align: center; padding: 5px 2px; border-radius: 7px; background: rgba(255,255,255,.04); border: 1px solid transparent; }
+  .q.pick { border-color: var(--accent); background: rgba(255,211,77,.14); }
+  .q .n { color: var(--dim); font-size: 10px; }
+  .q .v { font-variant-numeric: tabular-nums; font-size: 11px; }
+  .q.neg .v { color: var(--bad); }
+  .q.pos .v { color: var(--good); }
+  .sub.ok { color: var(--good); }
+  .sub.no { color: var(--bad); }
+  .legend { display: grid; gap: 5px; color: var(--dim); font-size: 11px; }
+  .legend div { display: flex; align-items: center; gap: 7px; }
+  .legend i { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .legend b { font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
+
+  /* ---- bottom: controls ---- */
+  #ctl { bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; }
+  button {
+    font: inherit; font-weight: 600; color: #15192c; background: var(--accent);
+    border: 0; border-radius: 8px; padding: 7px 14px; cursor: pointer;
+  }
+  button.ghost { background: rgba(255,255,255,.1); color: var(--ink); }
+  label { color: var(--dim); display: flex; align-items: center; gap: 7px; }
+  input[type=range] { width: 92px; accent-color: var(--accent); }
+
+  /* ---- crash card ---- */
+  #crash {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 330px; text-align: center; display: none;
+  }
+  #crash.on { display: block; }
+  #crash h2 { margin: 0 0 6px; font-size: 20px; color: var(--bad); letter-spacing: .5px; }
+  #crash .why { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  #crash .why b { color: var(--ink); font-weight: 600; }
+  .mono { font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div class="panel" id="picker">
+  <h1>Minion Rush — Q-learning</h1>
+  <div class="sub">Pick an episode. The run below uses the greedy policy from
+    that checkpoint, unchanged, until it crashes.</div>
+  <div class="eps" id="eps"></div>
+  <hr>
+  <div class="row"><span class="k">cells visited</span><span id="pk-cells">—</span></div>
+  <div class="row"><span class="k">exp. reward / row</span><span id="pk-rew">—</span></div>
+  <div class="row"><span class="k">ε at this point</span><span id="pk-eps">—</span></div>
+  <div class="row"><span class="k">unsafe states</span><span id="pk-unsafe">—</span></div>
+  <div class="row"><span class="k">needless jumps/rolls</span><span id="pk-waste">—</span></div>
+  <div class="sub" id="pk-verdict" style="margin:8px 0 0">—</div>
+  <hr>
+  <div class="legend">
+    <div><i style="background:#ffb347"></i><b>_</b> low — jump it</div>
+    <div><i style="background:#6fd3ff"></i><b>^</b> duck — roll under</div>
+    <div><i style="background:#ff6b81"></i><b>#</b> wall — swipe around</div>
+    <div><i style="background:#ffb347"></i><b>o</b> pit — a short hole, jump it</div>
+    <div><i style="background:#ff6b81"></i><b>=</b> chasm — longer than the
+      jump arc, so swipe around</div>
+    <div><i style="background:#f5d020"></i><b>b B v O</b> banana, +2 — on open
+      road, on a crate, under a beam, dangling over a pit</div>
+    <div class="sub" style="margin-top:6px">A pit hits exactly like a crate
+      and a chasm exactly like a wall — the colours say so. Same two answers,
+      two more symbols to learn them under.</div>
+  </div>
+</div>
+
+<div class="panel" id="hud">
+  <div class="row"><span class="k">rows cleared</span><span id="h-cleared">0</span></div>
+  <div class="row"><span class="k">bananas grabbed</span><span id="h-bananas">0</span></div>
+  <div class="row"><span class="k">return so far</span><span id="h-ret">0.0</span></div>
+  <div class="row"><span class="k">best this episode</span><span id="h-best">0</span></div>
+  <hr>
+  <div class="row"><span class="k">incoming row</span><span class="track" id="h-track">· · ·</span></div>
+  <div class="row"><span class="k">state s</span><span id="h-state">—</span></div>
+  <div class="row"><span class="k">Q[s] →</span><span id="h-act">—</span></div>
+  <div class="qgrid" id="h-q"></div>
+  <div class="sub" style="margin:8px 0 0" id="h-note"></div>
+</div>
+
+<div class="panel" id="ctl">
+  <button id="btn-run">Run</button>
+  <button class="ghost" id="btn-same">Same course</button>
+  <label>speed <input type="range" id="sp" min="0.4" max="2.2" step="0.1" value="1"></label>
+  <label><input type="checkbox" id="auto" checked> auto-restart</label>
+</div>
+
+<div class="panel" id="crash">
+  <h2>CRASHED</h2>
+  <div class="why" id="crash-why"></div>
+  <button id="btn-again">Run again</button>
+</div>
+
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+
+/* ------------------------------------------------------------------ *
+ * The environment, restated.
+ *
+ * MinionRush-v4 is a ONE-STEP env: reset() deals a (lane, track), the
+ * agent acts once, the episode ends. So a "run until it crashes" is
+ * not something the trained agent ever experienced. What happens below
+ * is that same one-step decision, chained over a stream of rows: each
+ * incoming row is a fresh track, the agent reads Q[lane*992 + index] and
+ * acts, and the lane it lands in carries over to the next row. The
+ * policy is untouched; only the presentation is continuous.
+ *
+ * Two axes. x is the lane; y is the posture taken through the row —
+ * GROUND, AIR or ROLL. Six obstacles, each with exactly ONE answer:
+ *   CLEAR  nothing there                                  -> stay down
+ *   LOW    a short crate — hits you at ground level,
+ *          rolling included                               -> jump it
+ *   DUCK   an overhead beam — hits you standing or
+ *          airborne                                       -> roll under it
+ *   PIT    a missing floor tile, shorter than the
+ *          jump arc                                       -> jump it
+ *   CHASM  a pit longer than the jump arc                 -> go around it
+ *   WALL   a tall wall — hits you at any height           -> go around it
+ *
+ * LOW hitting a ROLL is the load-bearing rule: rolling is ground level as
+ * far as a crate is concerned, so roll is not a strict upgrade on jump even
+ * though the two cost the same 0.5.
+ *
+ * Nothing punishes leaving the ground. Restraint comes from that 0.5, so the
+ * grounded action wins by exactly 0.5 whenever the lane is clear.
+ *
+ * v4 adds PIT and CHASM — the same hazard at two sizes, where the SIZE is
+ * the mechanic. Neither is a new hit mask: PIT is identical to LOW and
+ * CHASM is identical to WALL, so the agent learns two answers it already
+ * knew, twice, under two more symbols. That duplication is the deliberate
+ * price of a road that looks like the game. A chasm is drawn long in z but
+ * lives inside ONE row's slot with clear road at both ends — a hazard that
+ * bled across rows would be one a one-row episode could never see the end
+ * of. See PIT_LEN / CHASM_LEN against AIR_SPAN below.
+ *
+ * The BANANA is worth +2 — a second axis on the cell, not another
+ * obstacle. A banana can sit on CLEAR, on a LOW, under a DUCK or dangling
+ * over a PIT, never in a WALL or a CHASM, so the alphabet is 4x2 + 2 = 10.
+ * Collected at any height: land in
+ * the lane and survive and it is yours. That means a banana never changes
+ * WHICH posture is correct for a cell, only whether the cell is worth
+ * travelling to — the whole new tension is priced in swipes:
+ *
+ *   banana underfoot, clear ground      +2 +2         = +4.0  <- new ceiling
+ *   banana underfoot, under a beam      +2 +2 -0.5    = +3.5
+ *   banana one lane over, on a crate    +2 +2 -1 -0.5 = +2.5
+ *   banana two lanes over, clear        +2 +2 -2      = +2.0  <- ties with
+ *   nothing at all, stand still         +2            = +2.0     standing still
+ *
+ * Watch for the row where the minion is standing somewhere perfectly safe and
+ * swipes onto an obstacle anyway. It is not a bug: it is buying a banana for
+ * half a point, and that is the behaviour the whole axis was added to create.
+ * ------------------------------------------------------------------ */
+/* v4: 992 winnable rows out of 1000 base-10 codes. With CHASM and WALL both
+   impassable there are 2**3 = 8 all-impassable rows scattered through the
+   code space, so the state's track index is a position in the filtered list
+   `TRACK_CODES` — shipped in checkpoints.json rather than recomputed here,
+   so there is only ever one copy of the filter rule. */
+const LANES = 3;
+let N_TRACK = 992;                       // overwritten from the payload
+const N_CELL_TYPES = 10;
+const CLEAR = 0, LOW = 1, DUCK = 2, PIT = 3;
+const BCLEAR = 4, BLOW = 5, BDUCK = 6, BPIT = 7;   // the same four, with a banana
+const CHASM = 8, WALL = 9;               // the two nothing gets you through
+const GROUND = 0, AIR = 1, ROLL = 2;
+
+/* A banana changes a cell's payoff, never its geometry — so each banana twin
+   maps back to the obstacle it is sitting on, and every mesh, collision test
+   and hint string works off the base. */
+const BASE_CELL   = [CLEAR, LOW, DUCK, PIT, CLEAR, LOW, DUCK, PIT, CHASM, WALL];
+const WITH_BANANA = [BCLEAR, BLOW, BDUCK, BPIT];
+const hasBanana = (cell) => cell >= BCLEAR && cell <= BPIT;
+const LANE_X = [-2.1, 0, 2.1];
+const ACTION_NAMES = ["L2", "L1", "stay", "R1", "R2",
+                      "L2+J", "L1+J", "jump", "R1+J", "R2+J",
+                      "L2+R", "L1+R", "roll", "R1+R", "R2+R"];
+const SHIFT   = [-2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2];
+const HEIGHTS = [ 0,  0, 0, 0, 0,  1,  1, 1, 1, 1,  2,  2, 2, 2, 2];
+
+/* which heights each cell hits, [cell][height] — mirrors HITS in minion_rush.py */
+const HITS = [[false, false, false],     // CLEAR
+              [true,  false, true ],     // LOW  — only a jump clears a crate
+              [true,  true,  false],     // DUCK — only a roll clears a beam
+              [true,  false, true ],     // PIT  — jump it, same mask as LOW
+              [false, false, false],     // BCLEAR \ banana twins hit exactly
+              [true,  false, true ],     // BLOW    | like the obstacle they
+              [true,  true,  false],     // BDUCK   | are sitting on
+              [true,  false, true ],     // BPIT   /
+              [true,  true,  true ],     // CHASM — same mask as WALL
+              [true,  true,  true ]];    // WALL
+
+const SPAWN_Z   = -150;   // rows appear here
+const DECIDE_Z  = -22;    // ...and the agent commits here
+const PLAYER_Z  = 0;      // ...and collision resolves here
+const ROW_GAP   = 26;     // world units between rows
+const BASE_SPEED = 30;    // units/sec at speed 1.0
+const SWIPE_TIME = 0.17;  // seconds per lane crossed
+const JUMP_H    = 1.4;    // peak lift: clears a LOW with room to spare
+/* The minion was built 2.0 units tall on a road with lanes 2.1 apart, which
+   made him the biggest thing on screen and left no room under anything. At
+   0.72 he stands 1.44 — still the focus, but the obstacles can now be built
+   at a size that reads. */
+const MINION_SCALE = 0.72;
+/* The tuck SQUASHES rather than shrinks: y collapses to 0.6 while x/z barely
+   move, so he becomes a ball of roughly his own width instead of a miniature
+   of himself. A uniform shrink was the first attempt and it read as "the
+   minion got small", not "the minion tucked" — the silhouette has to stay his
+   width or the eye loses him. */
+const ROLL_SX = 0.95, ROLL_SY = 0.6;
+/* Airborne distance, NOT airborne time — so the manoeuvre covers the same
+   stretch of road at every speed setting, and the takeoff always sits the
+   same distance in front of the obstacle. 13 units is ~0.43s at speed 1; an
+   earlier build launched at the decision point instead and spent 44 units
+   off the ground, which is why it read as flying rather than jumping.
+   The roll borrows the same span, so jump and roll commit at the same
+   moment — they cost the same in the env, so they should look equally
+   committed here. */
+const AIR_SPAN  = 13;
+const LAUNCH_Z  = PLAYER_Z - AIR_SPAN / 2;    // leaves the ground here...
+                                              // ...and lands AIR_SPAN/2 past 0
+
+/* `v` is `^` turned over: the beam is still there, you go under it.
+   `O` is `o` filled: the hole is still there, the banana hangs above it. */
+const CELL_CHARS = ["·", "_", "^", "o", "b", "B", "v", "O", "=", "#"];
+
+/* Two numbers, and confusing them is the easiest bug in the file:
+     raw code     a base-10 number 0..999, what the cells literally spell
+     track index  0..991, a position in TRACK_CODES, what a state carries   */
+let TRACK_CODES = [];                 // from the payload
+let TRACK_INDEX = new Map();          // raw code -> index
+let TRACKS = [];                      // index -> [c0, c1, c2]
+
+const rawToTrack = (code) =>
+  Array.from({length: LANES}, (_, i) =>
+    Math.floor(code / N_CELL_TYPES ** i) % N_CELL_TYPES);
+const trackToRaw = (track) =>
+  track.reduce((acc, c, i) => acc + c * N_CELL_TYPES ** i, 0);
+
+function loadTrackCodes(codes) {
+  TRACK_CODES = codes;
+  N_TRACK = codes.length;
+  TRACKS = codes.map(rawToTrack);
+  TRACK_INDEX = new Map(codes.map((c, i) => [c, i]));
+}
+
+const indexToTrack = (index) => TRACKS[index];
+const trackToIndex = (track) => TRACK_INDEX.get(trackToRaw(track));
+
+const hits = (cell, height) => HITS[cell][height];
+const trackStr = (index) => indexToTrack(index).map(c => CELL_CHARS[c]).join(" ");
+
+/* argmax with first-max tie-breaking — matches numpy's argmax, which is
+   what train.py used, so ties resolve the same way here as in training. */
+function argmax(row) {
+  let best = 0;
+  for (let i = 1; i < row.length; i++) if (row[i] > row[best]) best = i;
+  return best;
+}
+
+/* Deterministic PRNG (mulberry32) so every checkpoint can be sent down
+   the exact same course — otherwise you're comparing policies on
+   different obstacle streams and the comparison means nothing. */
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ------------------------------ scene ------------------------------ */
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+stage.appendChild(renderer.domElement);
+
+/* The colour of nothing. Shared by the sky, the fog and the inside of every
+   hole in the road — a pit is a window onto the same emptiness the world is
+   suspended in, so all three have to be one constant or they drift apart. */
+const VOID_COLOR = 0x0b1020;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(VOID_COLOR);
+scene.fog = new THREE.Fog(VOID_COLOR, 60, 145);
+
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 400);
+const camRig = new THREE.Object3D();
+scene.add(camRig);
+camRig.add(camera);
+camera.position.set(0, 4.6, 9.4);
+camera.lookAt(0, 1.9, -9);
+
+scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x1a2140, 0.85));
+const sun = new THREE.DirectionalLight(0xfff3d0, 1.5);
+sun.position.set(-7, 16, 7);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -16; sun.shadow.camera.right = 16;
+sun.shadow.camera.top = 16;   sun.shadow.camera.bottom = -24;
+scene.add(sun);
+
+/* ---- road: one long plane, scrolled by moving the texture offset ---- */
+function roadTexture() {
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 256;
+  const g = c.getContext("2d");
+  g.fillStyle = "#222a46"; g.fillRect(0, 0, 256, 256);
+  g.fillStyle = "#1b2240";
+  for (let i = 0; i < 256; i += 64) g.fillRect(0, i, 256, 32);   // cross-ties
+  g.strokeStyle = "rgba(255,255,255,.14)"; g.lineWidth = 3;
+  for (const x of [85, 171]) {                                    // lane lines
+    g.setLineDash([26, 22]);
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 256); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(1, 16);
+  return t;
+}
+const roadTex = roadTexture();
+const road = new THREE.Mesh(
+  new THREE.PlaneGeometry(6.6, 420),
+  new THREE.MeshStandardMaterial({ map: roadTex, roughness: 0.95 })
+);
+road.rotation.x = -Math.PI / 2;
+road.position.z = -170;
+road.receiveShadow = true;
+scene.add(road);
+
+for (const side of [-1, 1]) {                                     // kerbs
+  const kerb = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.5, 420),
+    new THREE.MeshStandardMaterial({ color: 0x3a4472, roughness: 0.8 })
+  );
+  kerb.position.set(side * 3.55, 0.25, -170);
+  scene.add(kerb);
+}
+
+/* ---- decoration: pillars rushing past, for a sense of speed ---- */
+const pillars = [];
+for (let i = 0; i < 26; i++) {
+  const h = 6 + (i % 4) * 3;
+  const p = new THREE.Mesh(
+    new THREE.BoxGeometry(1.4, h, 1.4),
+    new THREE.MeshStandardMaterial({ color: 0x1d2547, roughness: 0.8 })
+  );
+  p.position.set((i % 2 ? 1 : -1) * (5.6 + (i % 3) * 1.6), h / 2, -i * 14);
+  scene.add(p);
+  pillars.push(p);
+}
+
+/* ------------------------------ minion -----------------------------
+ * The look everyone converges on, and why each bit matters:
+ *   - one pill-shaped body, NO neck and no separate head. The head is just
+ *     the top of the same capsule. This is the single biggest tell.
+ *   - a chrome goggle rim with a strap that wraps the whole head, sitting
+ *     high up, taking a good third of the face width.
+ *   - one eye (the Stuart build), brown iris, visible white, tiny glint.
+ *   - wide simple mouth low on the face, dark interior.
+ *   - denim bib overalls over the bottom ~40%, with shoulder straps and
+ *     metal buttons; a plain patch pocket on the bib.
+ *   - stubby limbs, mitten hands, chunky black shoes.
+ * ------------------------------------------------------------------ */
+const YELLOW = 0xf7d417, DENIM = 0x3f5d99, DENIM_DK = 0x2f4a7d;
+function mat(color, rough = 0.55) {
+  return new THREE.MeshStandardMaterial({ color, roughness: rough });
+}
+function chrome(color, rough = 0.25) {
+  return new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0.85 });
+}
+function makeMinion() {
+  const g = new THREE.Group();
+  const EYE_Y = 1.58, R = 0.6;
+
+  /* one continuous pill: hips at ~0.52, crown at ~2.0 */
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(R, 0.82, 10, 24), mat(YELLOW, 0.65));
+  body.position.y = 1.2;
+  body.castShadow = true;
+  g.add(body);
+
+  /* ---- overalls: a slightly larger shell over the lower body ---- */
+  const pants = new THREE.Mesh(
+    new THREE.CapsuleGeometry(R + 0.025, 0.3, 8, 24), mat(DENIM, 0.75));
+  pants.position.y = 0.86;
+  pants.scale.y = 0.95;
+  pants.castShadow = true;
+  g.add(pants);
+  /* square off the top edge so it reads as a waistband, not a skirt */
+  const waist = new THREE.Mesh(
+    new THREE.CylinderGeometry(R + 0.03, R + 0.03, 0.12, 24), mat(DENIM_DK, 0.75));
+  waist.position.y = 1.12;
+  g.add(waist);
+
+  /* bib + straps over the shoulders */
+  const bib = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.42, 0.12), mat(DENIM, 0.75));
+  bib.position.set(0, 1.3, R - 0.06);
+  g.add(bib);
+  const pocket = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.04), mat(DENIM_DK, 0.75));
+  pocket.position.set(0, 1.28, R + 0.02);
+  g.add(pocket);
+
+  for (const s of [-1, 1]) {
+    /* strap runs up the chest, over the shoulder, and down the back */
+    const strap = new THREE.Mesh(
+      new THREE.TorusGeometry(0.42, 0.055, 6, 20, Math.PI * 0.95), mat(DENIM, 0.75));
+    strap.position.set(s * 0.28, 1.18, 0);
+    strap.rotation.y = Math.PI / 2;
+    strap.rotation.z = -Math.PI / 2;
+    strap.scale.set(1, 1.05, 1);
+    g.add(strap);
+
+    const button = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.04, 12), chrome(0xcfd6e4));
+    button.position.set(s * 0.26, 1.49, R - 0.01);
+    button.rotation.x = Math.PI / 2;
+    g.add(button);
+  }
+
+  /* ---- goggle: housing, chrome rim, wrap strap ---- */
+  const housing = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.33, 0.33, 0.2, 24), mat(0x4b5566, 0.6));
+  housing.position.set(0, EYE_Y, R - 0.02);
+  housing.rotation.x = Math.PI / 2;
+  g.add(housing);
+
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.33, 0.065, 12, 28), chrome(0xb9c2d0));
+  rim.position.set(0, EYE_Y, R + 0.09);
+  g.add(rim);
+
+  /* the strap wraps the head: a ring whose axis is vertical */
+  const band = new THREE.Mesh(new THREE.TorusGeometry(R + 0.015, 0.075, 10, 32), mat(0x3a3f4a, 0.7));
+  band.position.y = EYE_Y;
+  band.rotation.x = Math.PI / 2;
+  g.add(band);
+
+  /* ---- the eye, grouped so the iris can dart as one piece ---- */
+  const sclera = new THREE.Mesh(new THREE.SphereGeometry(0.265, 20, 16), mat(0xfbfbf7, 0.3));
+  sclera.position.set(0, EYE_Y, R + 0.06);
+  g.add(sclera);
+
+  const pupil = new THREE.Group();            // iris + pupil + glint
+  const iris = new THREE.Mesh(new THREE.SphereGeometry(0.135, 16, 14), mat(0x6b4423, 0.4));
+  iris.position.z = 0.17;
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.068, 14, 12), mat(0x150f0a, 0.35));
+  dot.position.z = 0.235;
+  const glint = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 8), mat(0xffffff, 0.1));
+  glint.position.set(-0.07, 0.08, 0.245);
+  pupil.add(iris, dot, glint);
+  pupil.position.set(0, EYE_Y, R + 0.06);
+  g.add(pupil);
+  g.userData.pupil = pupil;
+
+  /* ---- mouth: wide, low, dark inside ---- */
+  const mouth = new THREE.Group();
+  const lips = new THREE.Mesh(
+    new THREE.TorusGeometry(0.2, 0.05, 8, 22, Math.PI), mat(0xd8a93c, 0.6));
+  lips.rotation.z = Math.PI;
+  const cavity = new THREE.Mesh(
+    new THREE.SphereGeometry(0.19, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
+    mat(0x55301c, 0.6));
+  cavity.scale.set(1, 0.7, 0.45);
+  mouth.add(lips, cavity);
+  mouth.position.set(0, 1.08, R + 0.02);
+  g.add(mouth);
+  g.userData.mouth = mouth;
+
+  /* ---- hair: a few sparse strands, swept back ---- */
+  const hair = [];
+  for (let i = 0; i < 5; i++) {
+    const h = new THREE.Mesh(new THREE.CapsuleGeometry(0.028, 0.2, 4, 8), mat(0x241f1a, 0.7));
+    h.position.set((i - 2) * 0.12, 1.98 - Math.abs(i - 2) * 0.04, -0.02);
+    h.rotation.z = (i - 2) * 0.26;
+    g.add(h);
+    hair.push(h);
+  }
+  g.userData.hair = hair;
+
+  /* ---- stubby arms with mitten hands, stubby legs with big shoes ---- */
+  const arms = [], legs = [];
+  for (const s of [-1, 1]) {
+    const arm = new THREE.Group();
+    const upper = new THREE.Mesh(new THREE.CapsuleGeometry(0.115, 0.34, 6, 12), mat(YELLOW, 0.65));
+    upper.position.y = -0.2;
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.145, 14, 12), mat(YELLOW, 0.65));
+    hand.position.y = -0.44;
+    hand.scale.set(1, 0.95, 0.8);
+    const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.07, 4, 8), mat(YELLOW, 0.65));
+    thumb.position.set(s * 0.11, -0.4, 0.05);
+    thumb.rotation.z = s * 0.7;
+    arm.add(upper, hand, thumb);
+    arm.position.set(s * (R + 0.04), 1.3, 0);
+    arm.rotation.z = s * 0.14;
+    upper.castShadow = hand.castShadow = true;
+    g.add(arm);
+    arms.push(arm);
+
+    const leg = new THREE.Group();
+    const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.135, 0.18, 6, 12), mat(DENIM_DK, 0.75));
+    shin.position.y = -0.14;
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.17, 0.46), mat(0x1d1f26, 0.65));
+    shoe.position.set(0, -0.32, -0.08);
+    const toe = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.3, 14, 1, false, 0, Math.PI), mat(0x1d1f26, 0.65));
+    toe.position.set(0, -0.245, -0.31);
+    toe.rotation.set(Math.PI / 2, 0, Math.PI / 2);
+    toe.scale.set(1, 1, 0.55);
+    leg.add(shin, shoe, toe);
+    /* y chosen so the sole lands on the road: 0.42 - 0.32 - 0.085 ≈ 0,
+       while the hip pivot still sits inside the capsule (bottom ≈ 0.19). */
+    leg.position.set(s * 0.26, 0.42, 0);
+    shin.castShadow = shoe.castShadow = true;
+    g.add(leg);
+    legs.push(leg);
+  }
+  g.userData.arms = arms;
+  g.userData.legs = legs;
+  return g;
+}
+/* The face is modelled on the +z side, and the camera sits at +z — so the
+   body is turned to face down the track (-z) and the animation transforms
+   (lean, tumble, bob) are applied to an outer group instead, where +x and
+   +z still mean what the rest of the code assumes. */
+/* The roll needs the body to turn about its own middle, not about its feet —
+   a somersault pivoting on the soles would scythe through the road. So an
+   extra group sits at the body centre and carries the tuck (scale) and the
+   tumble (rotation.x); the child cancels the offset, so standing still looks
+   exactly as it did. The crash tumble deliberately keeps pivoting on the
+   feet, on the outer group, because being knocked over should pivot there. */
+const ROLL_PIVOT_Y = 1.0;
+const minion = new THREE.Group();
+const rollPivot = new THREE.Object3D();
+const minionBody = makeMinion();
+minionBody.rotation.y = Math.PI;
+minionBody.position.y = -ROLL_PIVOT_Y;   // ...cancelled by the pivot's offset
+rollPivot.position.y = ROLL_PIVOT_Y;
+rollPivot.add(minionBody);
+minion.add(rollPivot);
+minion.scale.setScalar(MINION_SCALE);
+minion.userData = minionBody.userData;
+scene.add(minion);
+
+/* Scaling about the centre leaves the centre where it was, so the tucked body
+   has to drop by however much its reach shrank. maxSemi is the furthest the
+   body extends from that centre — which during a somersault is simply its
+   largest semi-axis, since a capsule squashed toward a sphere sweeps no
+   corners. At rest this returns 0, so the drop eases in with the tuck. */
+const maxSemi = (sx, sy) => Math.max(1.0 * sy, 0.6 * sx);
+const rollDrop = (sx, sy) => MINION_SCALE * (ROLL_PIVOT_Y - maxSemi(sx, sy));
+function restPosture() {
+  rollPivot.scale.set(1, 1, 1);
+  rollPivot.rotation.x = 0;
+}
+
+/* ------------------------------ obstacles --------------------------
+ * One family, three silhouettes, read in under a second at speed:
+ *   LOW  amber hurdle, knee high, face on top, eyes looking up — the
+ *        gap is above it, so the shape has to feel steppable-over.
+ *   DUCK cyan beam slung between two posts, nothing underneath — the gap
+ *        is below it, so the shape has to feel duckable-under.
+ *   WALL pink crate at full height, banded and bolted, no gap at any
+ *        height — the silhouette has to read as "not over, around".
+ * Colour carries the rule: warm = go up, cyan = go under, pink = go around.
+ * Geometry says the same thing twice, so the colour is never load-bearing:
+ * the gap in the silhouette is on the side you have to pass.
+ * ------------------------------------------------------------------ */
+function grumpyFace(g, y, z, scale = 1, ink = 0x2a1420) {
+  for (const s of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.17 * scale, 14, 12), mat(0xffffff, 0.25));
+    e.position.set(s * 0.33, y, z);
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.075 * scale, 12, 10), mat(ink, 0.3));
+    p.position.set(s * 0.33, y - 0.05, z + 0.14);
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.3 * scale, 0.06, 0.06), mat(ink, 0.5));
+    brow.position.set(s * 0.33, y + 0.21 * scale, z + 0.02);
+    brow.rotation.z = s * 0.3;
+    g.add(e, p, brow);
+  }
+}
+
+/* LOW: top at 0.9, so a 1.4-unit jump clears it with room to spare. */
+function makeLow() {
+  const g = new THREE.Group();
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.44, 0.7), mat(0xffb347, 0.5));
+  bar.position.y = 0.68; bar.castShadow = true;
+  g.add(bar);
+  for (const s of [-1, 1]) {
+    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.5, 0.5), mat(0xc77a1e, 0.6));
+    foot.position.set(s * 0.68, 0.25, 0);
+    foot.castShadow = true;
+    g.add(foot);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.46, 0.73), mat(0x3a2a14, 0.5));
+    stripe.position.set(s * 0.46, 0.68, 0);
+    g.add(stripe);
+  }
+  /* a little chevron on the lid: the hint that the way past is upward */
+  for (const d of [-1, 1]) {
+    const v = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.05, 0.08), mat(0xfff0d6, 0.4));
+    v.position.set(d * 0.17, 0.91, -0.12);
+    v.rotation.y = d * 0.6;
+    g.add(v);
+  }
+  grumpyFace(g, 0.74, 0.36, 0.85);
+  return g;
+}
+
+/* WALL: 0 -> 2.9, no gap at either height. */
+function makeWall() {
+  const g = new THREE.Group();
+  const box = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.9, 1.2), mat(0xff6b81, 0.5));
+  box.position.y = 1.45; box.castShadow = true;
+  g.add(box);
+  for (const y of [0.85, 2.05]) {
+    const band = new THREE.Mesh(new THREE.BoxGeometry(1.56, 0.22, 1.26), mat(0xfff0f2, 0.5));
+    band.position.y = y;
+    g.add(band);
+  }
+  const bolt = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.1, 1.24), mat(0xb33b50, 0.5));
+  bolt.position.y = 0.28;
+  g.add(bolt);
+  grumpyFace(g, 1.62, 0.62);
+  return g;
+}
+
+/* ---- PIT and CHASM: the floor going missing -------------------------
+ * The one obstacle family that is negative space, and the only one whose
+ * meaning is carried by its LENGTH rather than its height.
+ *
+ * AIR_SPAN is the distance the minion spends off the ground — 13 units,
+ * centred on the collision point. So the two lengths are not art direction,
+ * they are the mechanic drawn to scale:
+ *
+ *     PIT    6 units, spans -3 .. +3     inside the arc   -> jump it
+ *     CHASM 18 units, spans -9 .. +9     outside the arc  -> go around
+ *
+ * Both sit inside one ROW_GAP (26) with clear road at either end, so a chasm
+ * never touches its neighbouring rows. That containment is the whole reason
+ * a wide pit can exist here at all: the episode is ONE row, so a hazard that
+ * bled across rows would be one the agent could not see the end of. Drawn
+ * long in z but owned by a single cell, "too wide to jump" stays a fact
+ * about this row, decidable from this row's state.
+ *
+ * Colour follows the family rule — warm = go up, pink = go around — which
+ * here also quietly tells the truth about the model: a pit is amber because
+ * it IS a crate, a chasm is pink because it IS a wall.
+ * ------------------------------------------------------------------ */
+const PIT_LEN = 6, CHASM_LEN = 18;
+const PIT_W = 1.9;
+
+/* The void is BACKGROUND-COLOURED, UNLIT and FLAT, and all three matter.
+ *
+ * Background-coloured, not black: the hole is a gap in the road, and what
+ * shows through a gap is whatever the world is floating in — VOID_COLOR,
+ * the same value as the sky and the fog. Pure black reads as a dark object
+ * painted on the surface; the sky colour reads as the surface being absent.
+ * Keeping it on the fog's own colour also means it stays perfectly matched
+ * at every distance for free, since fogging it moves it toward the colour
+ * it already is.
+ *
+ * Unlit: a MeshStandardMaterial, however dark, still takes a diffuse and
+ * specular term, so as the hole travels down the road its shading drifts and
+ * the "absence" visibly shimmers. MeshBasicMaterial ignores every light in
+ * the scene and renders one constant colour — which is what a hole does.
+ *
+ * Flat, and lifted: the first build used a box sunk into the road with its
+ * top face at exactly y = 0, coplanar with the road surface. Two coplanar
+ * faces at the same depth is textbook z-fighting, and it flickered. There is
+ * no actual hole to cut — the road is one solid mesh — so the honest trick is
+ * a quad resting a hair ABOVE the road, never level with it.
+ */
+const VOID_Y = 0.012;
+const voidMat = new THREE.MeshBasicMaterial({
+  color: VOID_COLOR, polygonOffset: true, polygonOffsetFactor: -2,
+});
+
+function makeHole(len, rim, rimDark) {
+  const g = new THREE.Group();
+
+  const voidQuad = new THREE.Mesh(new THREE.PlaneGeometry(PIT_W, len), voidMat);
+  voidQuad.rotation.x = -Math.PI / 2;
+  voidQuad.position.y = VOID_Y;
+  g.add(voidQuad);
+
+  /* Rim on the road surface. This is the only part that is lit, so it is
+     what actually draws the hole at distance — the void alone is invisible
+     against a dark road until you are on top of it. */
+  const railL = len / 2 + 0.11;
+  for (const s of [-1, 1]) {
+    const side = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.12, len + 0.22), mat(rim, 0.45));
+    side.position.set(s * (PIT_W / 2 + 0.11), 0.03, 0);
+    g.add(side);
+    const end = new THREE.Mesh(
+      new THREE.BoxGeometry(PIT_W + 0.44, 0.12, 0.22), mat(rim, 0.45));
+    end.position.set(0, 0.03, s * railL);
+    g.add(end);
+  }
+
+  /* Hazard ticks along both long edges, dark on the rim. At CHASM_LEN there
+     are enough of them to read as a run, which is the length cue doing its
+     job before the far end is even visible. */
+  const ticks = Math.round(len / 1.5);
+  for (let i = 0; i < ticks; i++) {
+    const z = -len / 2 + (i + 0.5) * (len / ticks);
+    for (const s of [-1, 1]) {
+      const t = new THREE.Mesh(
+        new THREE.BoxGeometry(0.24, 0.14, 0.34), mat(rimDark, 0.5));
+      t.position.set(s * (PIT_W / 2 + 0.11), 0.04, z);
+      g.add(t);
+    }
+  }
+
+  /* No face. Every other obstacle in this scene scowls, and the hole is the
+     deliberate exception: a face needs a surface to sit on, and the whole
+     point of this one is that there is no surface. The rim carries the
+     colour rule on its own. */
+  return g;
+}
+
+/* PIT: short enough to clear. Amber, like the crate it is a twin of. */
+function makePit() { return makeHole(PIT_LEN, 0xffb347, 0xc77a1e); }
+
+/* CHASM: longer than the jump. Pink, like the wall it is a twin of. */
+function makeChasm() { return makeHole(CHASM_LEN, 0xff6b81, 0xb33b50); }
+
+/* DUCK: a chunky beam from DUCK_GAP up to 2.15, clear air beneath it.
+   The two heights this has to separate, with the minion at MINION_SCALE:
+       standing crown  1.44  -> must NOT fit
+       tucked crown    0.86  -> must fit, visibly
+   A gap of 1.15 sits between them with room on both sides: 0.29 of overlap
+   when standing, 0.22 of headroom when rolled even at the bottom of the
+   obstacle's idle bob. The first build had this at 1.35 with a much larger
+   minion, which left so little room that the tuck had to shrink him to a pea
+   to fit — the obstacle was driving the animation instead of the reverse. */
+const DUCK_GAP = 1.15;
+function makeDuck() {
+  const g = new THREE.Group();
+  const CYAN = 0x6fd3ff, CYAN_DK = 0x2f7ea8;
+
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.0, 0.8), mat(CYAN, 0.5));
+  beam.position.y = DUCK_GAP + 0.5; beam.castShadow = true;
+  g.add(beam);
+  /* a lip on the underside: catches the light and draws the eye to the gap */
+  const lip = new THREE.Mesh(new THREE.BoxGeometry(1.88, 0.14, 0.88), mat(CYAN_DK, 0.45));
+  lip.position.y = DUCK_GAP + 0.04;
+  g.add(lip);
+
+  /* posts are inside the lane and 1.64 apart — the tucked minion is ~0.82
+     across, so passing between them is visibly, generously possible */
+  for (const s of [-1, 1]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.15, 0.32), mat(CYAN_DK, 0.6));
+    post.position.set(s * 0.82, 1.075, 0);
+    post.castShadow = true;
+    g.add(post);
+    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.14, 0.56), mat(CYAN_DK, 0.6));
+    foot.position.set(s * 0.82, 0.07, 0);
+    g.add(foot);
+  }
+  /* chevrons on the beam face, pointing DOWN — the mirror of the LOW lid's */
+  for (const d of [-1, 1]) {
+    const v = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.05, 0.08), mat(0xe8faff, 0.4));
+    v.position.set(d * 0.15, DUCK_GAP + 0.24, 0.41);
+    v.rotation.z = d * 0.6;
+    g.add(v);
+  }
+  /* the face sits high on the beam and looks DOWN at the gap it is guarding */
+  grumpyFace(g, DUCK_GAP + 0.64, 0.42, 0.8, 0x123044);
+  return g;
+}
+
+/* BANANA: a crescent that hovers, spins and bobs, so it reads as a pickup
+   rather than as a fifth thing that can hurt you. Everything that can hurt
+   you in this scene has a grumpy face; the banana deliberately does not. */
+/* Hover height per base cell. Half-extent BANANA_H = 0.273, bob 0.05, so
+   these are the heights at which a banana never clips what it sits on/under:
+     CLEAR  bottom 0.10, hovering just off the road
+     LOW    bottom 0.91, resting on the crate's lid (top 0.90)
+     DUCK   top    0.75, well under a beam whose underside is at 1.15 */
+/* PIT sits at road height: the banana hangs in the air over the hole, which
+   is exactly the picture — nothing underneath it, and you leave the ground
+   to take it. Same number as CLEAR, for a completely different reason. */
+const BANANA_Y = {[CLEAR]: 0.42, [LOW]: 1.23, [DUCK]: 0.40, [PIT]: 0.42};
+const BANANA_BOB = 0.05;
+
+/* The mirror of grumpyFace(), and the only happy face in the scene. The
+   obstacles all scowl; the one thing you are supposed to run TOWARDS is the
+   one thing pleased to see you, so the expression carries the rule the same
+   way colour and silhouette do for the obstacles. */
+function happyFace(g, z, scale = 1) {
+  const ink = 0x4a3410;
+  for (const s of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.072 * scale, 14, 12),
+                             mat(0xffffff, 0.2));
+    e.position.set(s * 0.105, 0.035, z);
+    /* Oversized pupils set wide and low — the whole trick of a cute face is
+       a big iris sitting below centre in a big eye. */
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.044 * scale, 12, 10),
+                             mat(ink, 0.25));
+    p.position.set(s * 0.108, 0.025, z + 0.045);
+    const gleam = new THREE.Mesh(new THREE.SphereGeometry(0.017 * scale, 8, 8),
+                                 mat(0xffffff, 0.1));
+    gleam.position.set(s * 0.123, 0.052, z + 0.072);
+    /* Blush, flattened onto the surface so it reads as a mark, not a lump. */
+    const cheek = new THREE.Mesh(new THREE.SphereGeometry(0.042 * scale, 10, 8),
+                                 mat(0xff9d9d, 0.8));
+    cheek.position.set(s * 0.185, -0.055, z - 0.012);
+    cheek.scale.set(1, 0.65, 0.3);
+    g.add(e, p, gleam, cheek);
+  }
+  /* A smile is a torus arc rotated so its OPEN side faces up. Same primitive
+     as the banana body, one sixth the size. */
+  const smile = new THREE.Mesh(
+    new THREE.TorusGeometry(0.062 * scale, 0.017, 8, 16, Math.PI), mat(ink, 0.4));
+  smile.position.set(0, -0.058, z + 0.012);
+  smile.rotation.z = Math.PI;
+  g.add(smile);
+}
+
+/* The original cute banana, restored — a 180-degree torus arc swung a
+   quarter turn so its belly faces the camera, with a green stem, a brown
+   tip, and the only happy face in the scene on the belly.
+
+   The lesson of the two rebuilds in between: the problem was never the
+   DESIGN, it was the SCALE. Built at radius 0.3 it stood 0.83 units against
+   a 1.44-unit minion — torso-sized. So the design is back exactly as it was
+   and the whole group is simply scaled down, which keeps every internal
+   proportion (and the face placement) correct by construction instead of
+   needing each offset re-derived. */
+const BANANA_SCALE = 0.70;                 // -> 0.55 tall, ~0.38 x the minion
+const BANANA_H = 0.39 * BANANA_SCALE;      // half-extent, for clearances
+
+function makeBanana() {
+  const g = new THREE.Group();
+  /* The arc is built in the XY plane bulging toward +x, then the whole
+     crescent is swung a quarter turn so the belly — and the face on it —
+     points at the camera. It lives in its own group because composing the
+     two rotations on one mesh is a Euler-order puzzle nobody needs to solve
+     twice. */
+  const crescent = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.TorusGeometry(0.3, 0.115, 10, 20, Math.PI), mat(0xffd93d, 0.42));
+  body.scale.set(1, 0.82, 1);
+  body.rotation.z = -Math.PI / 2;
+  body.castShadow = true;
+  crescent.add(body);
+
+  const stem = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.15, 8),
+                              mat(0x7cc44a, 0.45));      // green, at the top
+  stem.position.set(0, 0.315, 0);
+  stem.rotation.z = -0.45;
+  crescent.add(stem);
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.12, 8),
+                             mat(0x8a5a22, 0.4));        // brown, at the bottom
+  tip.position.set(0, -0.31, 0);
+  tip.rotation.z = Math.PI + 0.45;
+  crescent.add(tip);
+
+  crescent.rotation.y = -Math.PI / 2;      // belly, and face, toward the camera
+  g.add(crescent);
+  /* 0.30, not 0.3-something-bigger: the y-squash above shrinks the torus's
+     BULGE, so the belly sits at 0.246 and its surface at 0.361. A face placed
+     for an unsquashed 0.3 radius floats in front of the fruit. */
+  happyFace(g, 0.30);
+
+  /* No halo. It rendered as a grey smudge behind each banana rather than a
+     glow, and with a bunch of them the smudges overlapped into a haze. */
+  g.scale.setScalar(BANANA_SCALE);
+  return g;
+}
+
+/* ------------------------------ bystanders -------------------------
+ * The game's boardwalk is FULL of other minions — loitering on the kerb,
+ * standing in a lane with their back to you, perched on a crate — and the
+ * best thing in it is that you bowl straight through them.
+ *
+ * They are SCENERY. The env has no cell for a minion, the state has no bit
+ * for one, and nothing here touches `resolve()`'s arithmetic: bumping one
+ * costs nothing and pays nothing. That is deliberate and it is the whole
+ * reason they are safe to add — a prop that changed the reward would be an
+ * obstacle the agent cannot see, which is the one thing a visualiser of an
+ * exactly-solved table must never draw.
+ *
+ * Two placements, and the rule for the second is the load-bearing one:
+ *   - KERB, outside the road entirely. Pure crowd; never touched.
+ *   - IN A LANE, but only lane 0 or lane 2, and never on clear road in the
+ *     middle lane. The middle lane on clear road is the policy's "do
+ *     nothing" option; a minion parked in it reads as a reason to swipe,
+ *     and the agent would appear to ignore it on every single row. Keeping
+ *     them off that cell means the picture never contradicts the decision.
+ *
+ * The body is the player's own `makeMinion()` at a smaller scale, turned to
+ * FACE the camera — you see their faces coming, and you see them fly.
+ * ------------------------------------------------------------------ */
+const NPC_SCALE = 0.60;                    // 1.2 tall against the player's 1.44
+const NPC_CROUCH = 0.76;                   // ...0.91 tall, clears a 1.15 beam
+const IDLE_WAVE = 0, IDLE_HOP = 1, IDLE_PACE = 2, IDLE_LOOK = 3;
+
+function makeNpc() {
+  const g = new THREE.Group();
+  const body = makeMinion();               // faces +z, i.e. back up the track
+  g.add(body);
+  g.userData = { kind: "npc", parts: body.userData };
+  return g;
+}
+
+/* Pose, not animation: the one-off setup a bystander keeps for its whole
+   life on screen. Crouching under a beam is the only one that is structural
+   — a standing minion is 1.2 tall and a DUCK's underside is at 1.15, so a
+   bystander under one has to be sitting or it wears the beam. */
+function dressNpc(b, { crouch = false, seed = Math.random(), pace = false } = {}) {
+  const p = b.userData.parts;
+  b.userData.phase = seed * Math.PI * 2;
+  /* Pacing is for the kerb only. A bystander that wanders sideways while
+     standing IN a lane blurs which lane it is in, and the lane is the only
+     thing about it the picture has to get right. */
+  let idle = crouch ? IDLE_LOOK : (seed * 97 | 0) % 4;
+  if (idle === IDLE_PACE && !pace) idle = IDLE_WAVE;
+  b.userData.idle = idle;
+  b.userData.crouch = crouch;
+  b.userData.knocked = false;
+  b.userData.kt = 0;
+  b.scale.set(NPC_SCALE, NPC_SCALE * (crouch ? NPC_CROUCH : 1), NPC_SCALE);
+  b.rotation.set(0, (seed - 0.5) * 0.9, 0);
+  /* Reset the pose: these come out of the pool still mid-yell, arms over
+     their heads, from whoever the player ran through four rows ago. */
+  p.arms.forEach((a, i) => a.rotation.set(0, 0, (i ? 1 : -1) * 0.14));  // the
+  p.legs.forEach(l => l.rotation.set(0, 0, 0));          // built-in arm splay
+  p.mouth.scale.setScalar(1);
+  p.pupil.position.x = 0;
+  if (crouch) p.legs.forEach(l => l.rotation.x = -1.5);
+  return b;
+}
+
+function takeNpc(opts) {
+  const b = pools.npc.pop() || makeNpc();
+  b.visible = true;
+  scene.add(b);
+  return dressNpc(b, opts);
+}
+
+/* A bump is a launch, not a collision: no momentum is exchanged because the
+   player has none to give — it never slows down, never changes lane, never
+   loses a point. The arc is pure comedy, aimed up and BACK past the camera
+   on the side it was hit from, so it clears the frame instead of pinwheeling
+   along in front of the player for the next three rows. */
+const KNOCK_G = 26;
+function knockNpc(b, dirX) {
+  if (b.userData.knocked) return;
+  b.userData.knocked = true;
+  b.userData.kt = 0;
+  b.userData.kv = {
+    x: dirX * (2.5 + Math.random() * 2),
+    y: 7 + Math.random() * 3,
+    z: 11 + Math.random() * 5,
+    spin: (Math.random() < 0.5 ? -1 : 1) * (7 + Math.random() * 5),
+    roll: (Math.random() - 0.5) * 9,
+  };
+  const p = b.userData.parts;
+  p.arms.forEach(a => a.rotation.x = -2.6);   // arms up, the universal "whoa"
+  p.legs.forEach(l => l.rotation.x = 0.5);
+  p.mouth.scale.setScalar(1.7);               // and a yell
+}
+
+/* One bystander, one frame. `t` drives the idles; `dt` integrates the
+   knock. Everything is relative to the slot it was spawned in (`ox/oy`)
+   and to the row's scrolling z, so a bystander that is mid-flight keeps
+   travelling with the road underneath it. */
+function animateNpc(b, rowZ, dt) {
+  const u = b.userData, p = u.parts;
+  if (u.knocked) {
+    const k = u.kv;
+    u.kt += dt;
+    const kt = u.kt;
+    b.position.set(u.ox + k.x * kt,
+                   Math.max(0, u.oy + k.y * kt - 0.5 * KNOCK_G * kt * kt),
+                   rowZ + u.oz + k.z * kt);
+    b.rotation.x = k.spin * kt;
+    b.rotation.z = k.roll * kt;
+    return;
+  }
+  const ph = t * 2.2 + u.phase;
+  b.position.x = u.ox;
+  b.position.z = rowZ + u.oz;
+  b.position.y = u.oy;
+  switch (u.idle) {
+    case IDLE_WAVE:                             // one arm up, swinging
+      p.arms[0].rotation.x = -2.5 + Math.sin(ph * 1.7) * 0.45;
+      p.arms[1].rotation.x = Math.sin(ph) * 0.2;
+      p.hair.forEach((h, i) => h.rotation.x = -0.3 + Math.sin(ph + i) * 0.1);
+      break;
+    case IDLE_HOP:                              // little excited jumps
+      b.position.y = u.oy + Math.abs(Math.sin(ph * 1.3)) * 0.22;
+      p.arms.forEach(a => a.rotation.x = -0.8 + Math.sin(ph * 1.3) * 0.7);
+      p.legs.forEach(l => l.rotation.x = Math.sin(ph * 1.3) * 0.3);
+      break;
+    case IDLE_PACE:                             // shuffling to and fro
+      b.position.x = u.ox + Math.sin(ph * 0.45) * 0.5;
+      b.rotation.y = Math.cos(ph * 0.45) > 0 ? 0.5 : -0.5;
+      p.legs.forEach((l, i) =>
+        l.rotation.x = Math.sin(ph * 2.4 + i * Math.PI) * 0.45);
+      p.arms.forEach((a, i) =>
+        a.rotation.x = Math.sin(ph * 2.4 + i * Math.PI + Math.PI) * 0.35);
+      break;
+    default:                                    // looking around, idly
+      b.rotation.y = Math.sin(ph * 0.5) * 0.7;
+      p.pupil.position.x = Math.sin(ph * 0.5) * 0.07;
+      p.arms.forEach(a => a.rotation.x = Math.sin(ph * 0.8) * 0.15);
+      break;
+  }
+  if (u.idle !== IDLE_HOP) b.position.y = u.oy + Math.sin(ph * 0.9) * 0.03;
+}
+
+/* ---- one CELL is a tight CLUSTER of bananas ---------------------------
+ * Rows sit ROW_GAP = 26 units apart while lanes are only 2.1 apart, so a row
+ * is 12.4 lane-widths and a single banana per cell is one lonely dot with 26
+ * units of empty boardwalk either side. It can never read as a bunch.
+ *
+ * But the answer is NOT to fill the gap. The game's rhythm is a short tight
+ * cluster, then clear road, then another cluster — stringing the clusters
+ * into one unbroken rope (which the previous build did, 14 props at 1.86
+ * spacing straight across the gap) reads as a conveyor belt, not bananas.
+ *
+ * So: 8 props at 0.78 apart — about two banana-widths, tight — spanning 5.5
+ * units, leaving ~20 units of clear road before the next cell. Purely
+ * presentational: the cluster is still ONE cell, ONE decision, and pays +2
+ * once, which is why collecting it frees the whole bunch.
+ * ---------------------------------------------------------------------- */
+const BUNCH      = 5;                     // props per cell
+const BUNCH_STEP = 1.6;                   // ~3 banana-lengths, clearly separate
+const BUNCH_SPAN = (BUNCH - 1) * BUNCH_STEP;      // 5.46 of the 26-unit gap
+
+/* Height across the bunch. A crate is 0.7 deep and the bunch is 5.5 long, so
+   holding BANANA_Y[LOW] flat across it would draw a raised plateau floating
+   past the crate's edges. Easing back to road height at the ends turns it
+   into an actual little ARC over the crate. */
+function bananaRunY(base, dz) {
+  const t = Math.min(1, Math.abs(dz) / (BUNCH_SPAN / 2));
+  const w = 1 - t * t;
+  return BANANA_Y[CLEAR] + (BANANA_Y[base] - BANANA_Y[CLEAR]) * w;
+}
+
+const BUILD = {[LOW]: makeLow, [DUCK]: makeDuck, [WALL]: makeWall,
+               [PIT]: makePit, [CHASM]: makeChasm};
+const pools = {[LOW]: [], [DUCK]: [], [WALL]: [], [PIT]: [], [CHASM]: [],
+               banana: [], npc: []};
+const isBanana = (b) => b.userData.kind === "banana";
+const isNpc = (b) => b.userData.kind === "npc";
+/* A hole is cut INTO the road, so it is the one obstacle that must not move
+   relative to it. The others shuffle in place and read as props standing on
+   the surface; the same bob on a pit makes the ground itself look liquid. */
+const isHole = (b) => b.userData.kind === PIT || b.userData.kind === CHASM;
+
+function takeBlock(kind) {
+  const b = pools[kind].pop() || BUILD[kind]();
+  b.userData.kind = kind;
+  b.visible = true;
+  scene.add(b);
+  return b;
+}
+
+/* Only the prop on the decision point gets the face and the halo; the other
+   thirteen are bare crescents. 14 faces x ~7 visible cells is 1200 draw calls
+   for detail that is sub-pixel at the far end of the road, and 14 overlapping
+   transparent haloes per cell is overdraw for a glow nobody can pick out.
+   Faced and plain bananas are pooled separately — `kind` is the pool key. */
+function takeBanana(base, dz) {
+  const b = pools.banana.pop() || makeBanana();
+  b.userData.kind = "banana";
+  b.userData.dz = dz;                    // offset along the row's run
+  b.userData.baseY = bananaRunY(base, dz);
+  b.visible = true;
+  scene.add(b);
+  return b;
+}
+function freeBlock(b) {
+  b.visible = false;
+  scene.remove(b);
+  pools[b.userData.kind].push(b);
+}
+
+/* ------------------------------ run state -------------------------- */
+let data = null;            // checkpoints.json
+let ckpt = null;            // selected checkpoint
+let run = null;             // live run, or null
+let speedMul = 1;
+let courseSeed = 12345;
+const best = new Map();     // episode -> best rows cleared, this session
+
+function newRun(seed) {
+  for (const r of (run?.rows ?? [])) r.blocks.forEach(freeBlock);
+  return {
+    seed,
+    rand: rng(seed),
+    rows: [],
+    lane: 1,
+    laneFrom: 1,
+    swipeT: 1,              // 1 == settled
+    cleared: 0,
+    bananas: 0,
+    ret: 0,
+    travel: 0,
+    nextSpawn: SPAWN_Z,
+    dead: false,
+    deadT: 0,
+    shake: 0,
+    lean: 0,
+    air: 0,                 // 1 while a jump or roll is playing
+    height: GROUND,         // which of the two it is
+    airT: 0,
+    airDur: 1,
+  };
+}
+
+/* ---------------------------- banana placement ---------------------
+ * Which lanes carry bananas is simply RANDOM, one roll per lane. There is no
+ * trail state machine threading them down a lane across rows: a trail spans
+ * consecutive rows, the env's episode is ONE row, so a trail could never be
+ * part of the state or of training anyway — and an earlier build that drew
+ * one turned the road into a single unbroken rope, which is not what the
+ * game looks like either.
+ *
+ * The game's rhythm comes from the CLUSTER (see BUNCH above): a tight bunch
+ * of bananas, then clear road, then another bunch. One row can easily carry
+ * bananas in two or three lanes; that is just how the dice land.
+ *
+ * Training stays uniform over all 992 codes regardless — see PROGRESS.md §5.
+ *
+ * Obstacle mix is weighted rather than uniform, and the floor hazards are
+ * the rarest things on the road: 0.12 of lanes carry a hole of either size
+ * against 0.34 carrying bananas, so a missing tile stays an event. CHASM is
+ * rarer again than PIT — it is the one that takes an option away rather
+ * than costing half a point, and at uniform weight the road reads as a
+ * building site.
+ * ------------------------------------------------------------------ */
+const P_BANANA_LANE = 0.34;      // chance any one passable lane carries a bunch
+
+/* Cumulative weights over the base cells. Must sum to 1. */
+const CELL_MIX = [[CLEAR, 0.40], [LOW, 0.18], [DUCK, 0.18],
+                  [WALL, 0.12], [PIT, 0.08], [CHASM, 0.04]];
+
+function pickCell(rand) {
+  let u = rand();
+  for (const [cell, w] of CELL_MIX) {
+    u -= w;
+    if (u < 0) return cell;
+  }
+  return CLEAR;                            // float slop; CLEAR is the safe default
+}
+
+function nextTrack(r) {
+  const rand = r.rand;
+  let track;
+  do {
+    /* Reject the 8 unwinnable rows. v3 had exactly one (all-WALL) and could
+       exclude it arithmetically; with CHASM impassable too there are 2**3,
+       and they have to be filtered — here and in minion_rush.py both. */
+    track = Array.from({length: LANES}, () => pickCell(rand));
+  } while (track.every(c => c === WALL || c === CHASM));
+
+  for (let i = 0; i < LANES; i++) {
+    /* Never in a WALL or a CHASM — you cannot reach into either, and the env
+       has no cell for it. Otherwise a bunch can land on clear road, on a
+       crate (jump to take it), under a beam (roll to take it) or dangling
+       over a pit (jump to take it), which is where the decisions come from. */
+    if (WITH_BANANA[track[i]] !== undefined && rand() < P_BANANA_LANE)
+      track[i] = WITH_BANANA[track[i]];
+  }
+  return track;
+}
+
+function spawnRow(r) {
+  const track = nextTrack(r);
+  const code = trackToIndex(track);        // a track INDEX, not a raw code
+  const blocks = [];
+  track.forEach((cell, i) => {
+    const base = BASE_CELL[cell];
+    if (base !== CLEAR) {
+      const b = takeBlock(base);
+      b.position.set(LANE_X[i], 0, SPAWN_Z);
+      blocks.push(b);
+    }
+    if (hasBanana(cell)) {
+      for (let k = 0; k < BUNCH; k++) {
+        const dz = (k - (BUNCH - 1) / 2) * BUNCH_STEP;
+        const b = takeBanana(base, dz);
+        b.position.set(LANE_X[i], b.userData.baseY, SPAWN_Z + dz);
+        blocks.push(b);
+      }
+    }
+  });
+  spawnBystanders(r, track, blocks);
+  r.rows.push({ code, track, blocks, z: SPAWN_Z, decided: false, launched: false,
+                resolved: false, action: null });
+}
+
+function decide(r, row) {
+  const s = r.lane * N_TRACK + row.code;
+  const q = ckpt.q[s];
+  const a = argmax(q);
+  row.action = a;
+  r.laneFrom = r.lane;
+  r.lane = Math.max(0, Math.min(LANES - 1, r.lane + SHIFT[a]));
+  r.swipeT = 0;
+  row.swiped = Math.abs(SHIFT[a]);
+  row.height = HEIGHTS[a];
+  /* The decision is committed here, but the manoeuvre is not — see LAUNCH_Z.
+     The minion keeps running and leaves the ground at the last moment. */
+  showDecision(s, row.code, q, a);
+  return a;
+}
+
+function resolve(r, row) {
+  /* Reward exactly as the env charges it: -1 per lane the swipe intended
+     to cross, -0.5 to leave the ground (jump and roll cost the same), then
+     +2 for surviving or -50 for a hit, and +2 more for a banana — which you
+     only pocket if you survived the cell it was sitting on. */
+  const cell = row.track[r.lane];
+  const hit = hits(cell, row.height);
+  const grabbed = hasBanana(cell) && !hit;
+  r.ret += -row.swiped - 0.5 * (row.height !== GROUND ? 1 : 0)
+           + (hit ? -50 : 2) + (grabbed ? 2 : 0);
+  if (grabbed) {
+    r.bananas++;
+    /* Take it off the road the instant it is collected, so the +2 on the HUD
+       and the bananas vanishing are the same event. The whole RUN goes, not
+       one prop — the run is a single cell and a single +2, so leaving the
+       other thirteen behind would imply bananas the minion can never have. */
+    const keep = row.blocks.filter(
+      b => !(isBanana(b) && Math.abs(b.position.x - LANE_X[r.lane]) < 0.01));
+    for (const b of row.blocks) if (!keep.includes(b)) freeBlock(b);
+    row.blocks = keep;
+  }
+  if (hit) {
+    r.dead = true;
+    r.shake = 1;
+    showCrash(r, row);
+  } else {
+    r.cleared++;
+    const prev = best.get(ckpt.episode) ?? 0;
+    if (r.cleared > prev) best.set(ckpt.episode, r.cleared);
+  }
+  hud();
+}
+
+/* ------------------------------ HUD -------------------------------- */
+const $ = (id) => document.getElementById(id);
+
+function hud() {
+  $("h-cleared").textContent = run ? run.cleared : 0;
+  $("h-bananas").textContent = run ? run.bananas : 0;
+  $("h-ret").textContent = run ? run.ret.toFixed(1) : "0.0";
+  $("h-best").textContent = ckpt ? (best.get(ckpt.episode) ?? 0) : 0;
+}
+
+function showDecision(s, code, q, a) {
+  $("h-track").textContent = trackStr(code);
+  $("h-state").textContent = `${s}  (lane ${Math.floor(s / N_TRACK)}, code ${code})`;
+  $("h-act").textContent = `${ACTION_NAMES[a]}  (${q[a].toFixed(2)})`;
+  /* three rows of five: grounded actions on top, the same five jumping, the
+     same five rolling, so the y-axis of the action space is the y-axis of
+     the grid — the CSS grid is 5 columns and wraps on its own */
+  $("h-q").innerHTML = q.map((v, i) =>
+    `<div class="q ${i === a ? "pick" : ""} ${v > 0 ? "pos" : v < 0 ? "neg" : ""}">
+       <div class="n">${ACTION_NAMES[i]}</div><div class="v">${v.toFixed(1)}</div>
+     </div>`).join("");
+
+  const exact = data.exact_q[s];
+  const bestA = argmax(exact);
+  $("h-note").textContent = exact[a] === exact[bestA]
+    ? "optimal choice here"
+    : `optimal was ${ACTION_NAMES[bestA]} (${exact[bestA].toFixed(0)}) — this table hasn't learned s=${s} yet`;
+}
+
+const WHY_HIT = {
+  [LOW]: "ran into a LOW hurdle instead of jumping it",
+  [DUCK]: "hit a DUCK beam instead of rolling under it",
+  [WALL]: "went into a WALL, which no height clears",
+  [PIT]: "dropped into a PIT instead of jumping it — a roll is still ground level",
+  [CHASM]: "went into a CHASM, which is longer than the jump arc",
+};
+
+function showCrash(r, row) {
+  const s = r.laneFrom * N_TRACK + row.code;
+  const q = ckpt.q[s];
+  const a = row.action;
+  const seen = ckpt.visits[s][a];
+  $("crash-why").innerHTML =
+    `Episode <b>${ckpt.episode}</b>'s policy met state <b class="mono">s=${s}</b>
+     (lane ${r.laneFrom}, track <span class="mono">${trackStr(row.code)}</span>)
+     and chose <b>${ACTION_NAMES[a]}</b> — it
+     ${WHY_HIT[BASE_CELL[row.track[r.lane]]]}.<br><br>
+     It had tried that pair <b>${seen}×</b> in training, so Q[${s}][${a}] still read
+     <b class="mono">${q[a].toFixed(2)}</b> instead of
+     <b class="mono">${data.exact_q[s][a].toFixed(2)}</b>.<br><br>
+     Survived <b>${r.cleared}</b> rows · return <b>${r.ret.toFixed(1)}</b>`;
+  $("crash").classList.add("on");
+}
+
+function buildPicker() {
+  const rewards = data.checkpoints.map(c => c.avg_reward);
+  const lo = Math.min(...rewards), hi = Math.max(...rewards);
+  $("eps").innerHTML = data.checkpoints.map((c, i) => {
+    const frac = (c.avg_reward - lo) / (hi - lo || 1);
+    return `<div class="ep" data-i="${i}">
+      <b>ep ${c.episode}</b>
+      <div class="bar"><i style="width:${Math.max(3, frac * 100)}%;
+        background:${c.safe ? "var(--good)" : "var(--bad)"}"></i></div>
+      <span class="tag ${c.safe ? "safe" : "unsafe"}">${c.safe ? "safe" : c.unsafe_states.length + " bad"}</span>
+    </div>`;
+  }).join("");
+  $("eps").querySelectorAll(".ep").forEach(el =>
+    el.onclick = () => select(+el.dataset.i));
+}
+
+function select(i) {
+  ckpt = data.checkpoints[i];
+  $("eps").querySelectorAll(".ep").forEach((el, j) =>
+    el.classList.toggle("sel", i === j));
+  /* Derived from the payload, not written down again. These numbers moved
+     twice in two versions and a hardcoded copy was wrong both times. */
+  const nStates = data.lanes * data.n_track;          // 2976
+  const nQCells = nStates * data.action_names.length; // 44640
+  $("pk-cells").textContent = `${ckpt.cells_seen} / ${nQCells}`;
+  $("pk-rew").textContent = ckpt.avg_reward.toFixed(2);
+  $("pk-eps").textContent = ckpt.epsilon.toFixed(3);
+  $("pk-unsafe").textContent = ckpt.safe ? "none" : ckpt.unsafe_states.join(", ");
+  /* Nothing in the env punishes a needless jump or roll, so crashes alone
+     would not reveal a policy that leaves the ground on every row. This is
+     that blind spot — and with three heights there are now two cheap ways to
+     be needlessly airborne, so it peaks higher and clears later. */
+  $("pk-waste").textContent = `${ckpt.wasted_jumps} / ${nStates}`;
+  /* A policy with no unsafe states cannot crash — every one of the states
+     has a surviving (lane, height) and greedy picks it. The run is endless by
+     construction, so say so instead of leaving the viewer waiting. */
+  $("pk-verdict").textContent = ckpt.safe
+    ? `greedy survives all ${nStates} states — this run cannot end`
+    : `greedy picks a losing move in ${ckpt.unsafe_states.length} of ${nStates} states`;
+  $("pk-verdict").className = "sub " + (ckpt.safe ? "ok" : "no");
+  start(courseSeed);
+}
+
+function start(seed) {
+  $("crash").classList.remove("on");
+  courseSeed = seed;
+  run = newRun(seed);
+  hud();
+}
+
+/* ------------------------------ loop ------------------------------- */
+const clock = new THREE.Clock();
+let t = 0;
+let frozen = false;         // dev: hold the current frame, keep rendering it
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (frozen) { renderer.render(scene, camera); requestAnimationFrame(tick); return; }
+  t += dt;
+
+  if (run && !run.dead) {
+    const speed = BASE_SPEED * speedMul;
+    const dz = speed * dt;
+    run.travel += dz;
+
+    // scroll the world
+    roadTex.offset.y -= dz / 26;
+    for (const p of pillars) {
+      p.position.z += dz;
+      if (p.position.z > 14) p.position.z -= 26 * 14;
+    }
+
+    // spawn on a fixed pitch so every course is reproducible
+    run.nextSpawn += dz;
+    if (run.nextSpawn >= SPAWN_Z + ROW_GAP) {
+      run.nextSpawn = SPAWN_Z;
+      spawnRow(run);
+    }
+
+    for (const row of run.rows) {
+      row.z += dz;
+      for (const b of row.blocks) {
+        b.position.z = row.z;
+        if (isBanana(b)) {
+          /* The obstacles shuffle in place; the banana hovers, so it reads as
+             something to collect rather than something to dodge. It WOBBLES
+             rather than spins — a full turn would swing the face away half
+             the time, and the face is the whole reason you want it. The tilt
+             runs at a different rate from the bob so the two never sync into
+             a mechanical-looking loop.
+
+             Phase comes from each prop's OWN z, not the row's, so the bob
+             travels along the run as a wave instead of the whole line
+             twitching in unison. */
+          const bz = row.z + b.userData.dz;
+          b.position.z = bz;
+          b.position.y = b.userData.baseY
+                       + Math.sin(t * 0.5 + bz * 0.9) * BANANA_BOB;
+          b.rotation.y = Math.sin(t * 0.33 + bz * 0.6) * 0.32;
+          b.rotation.z = Math.sin(t * 0.43 + bz * 0.45) * 0.11;
+        } else if (isHole(b)) {
+          /* Nailed to the road. A hole that bobs reads as a dark rug sliding
+             about on the surface; a hole that is perfectly still reads as
+             absence. It is the only obstacle whose stillness is what sells
+             it, because it is the only one made of missing ground. */
+          b.position.y = 0;
+          b.rotation.y = 0;
+        } else {
+          b.position.y = Math.sin(t * 3 + row.z * 0.1) * 0.07;
+          b.rotation.y = Math.sin(t * 1.6 + row.z * 0.08) * 0.12;
+        }
+      }
+      if (!row.decided && row.z >= DECIDE_Z) { row.decided = true; decide(run, row); }
+      /* Takeoff, timed so the apex lands on z=0 where the env resolves the
+         collision — apex and hit test must coincide or the picture
+         contradicts the reward. */
+      if (row.decided && row.height !== GROUND && !row.launched && row.z >= LAUNCH_Z) {
+        row.launched = true;
+        run.air = 1;
+        run.height = row.height;
+        run.airT = 0;
+        run.airDur = AIR_SPAN / (BASE_SPEED * speedMul);
+      }
+      if (!row.resolved && row.z >= PLAYER_Z) { row.resolved = true; resolve(run, row); }
+    }
+    // retire rows behind the camera
+    run.rows = run.rows.filter(row => {
+      if (row.z > 16) { row.blocks.forEach(freeBlock); return false; }
+      return true;
+    });
+
+    // swipe easing, scaled so a 2-lane swipe takes twice as long
+    if (run.swipeT < 1) {
+      const span = Math.max(1, Math.abs(run.lane - run.laneFrom));
+      run.swipeT = Math.min(1, run.swipeT + dt / (SWIPE_TIME * span * (1 / speedMul)));
+    }
+
+    if (run.air) {
+      run.airT += dt;
+      if (run.airT >= run.airDur) { run.air = 0; run.height = GROUND; }
+    }
+  }
+
+  if (run) {
+    const ease = (u) => u < 0.5 ? 4*u*u*u : 1 - Math.pow(-2*u + 2, 3) / 2;
+    const u = ease(run.swipeT);
+    const x = LANE_X[run.laneFrom] + (LANE_X[run.lane] - LANE_X[run.laneFrom]) * u;
+    const dir = Math.sign(LANE_X[run.lane] - LANE_X[run.laneFrom]);
+
+    // lean into the swipe, then settle
+    run.lean += ((run.swipeT < 1 ? dir * 0.34 : 0) - run.lean) * Math.min(1, dt * 11);
+
+    minion.position.x = x;
+    minion.rotation.z = -run.lean;
+    minion.rotation.y = run.lean * 0.5;
+
+    if (run.dead) {
+      // tumble
+      run.deadT += dt;
+      run.shake = Math.max(0, run.shake - dt * 2.2);
+      // flips backwards, matching the knock-back along +z below
+      minion.rotation.x = Math.min(1.5, run.deadT * 4);
+      minion.position.y = Math.max(0, Math.sin(Math.min(Math.PI, run.deadT * 5)) * 1.1);
+      minion.position.z = Math.min(5, run.deadT * 7);
+      minion.userData.mouth.scale.setScalar(1.6);
+      restPosture();
+      if (run.deadT > 1.9 && $("auto").checked) start(courseSeed);
+    } else if (run.air && run.height === AIR) {
+      /* a parabola, peaking at airDur/2 — the instant the row crosses z=0.
+         Limbs tuck and the eye looks up, so the height reads as deliberate
+         rather than as a bump in the run cycle. */
+      const u = run.airT / run.airDur;
+      restPosture();
+      minion.position.y = JUMP_H * 4 * u * (1 - u);
+      minion.position.z = 0;
+      minion.rotation.x = -0.07 - Math.sin(u * Math.PI) * 0.22;
+      minion.userData.mouth.scale.setScalar(1.25);
+      minion.userData.legs.forEach(l => l.rotation.x = -1.1);
+      minion.userData.arms.forEach(a => a.rotation.x = -2.1);
+      minion.userData.hair.forEach((h, i) => h.rotation.x = 0.5 + Math.sin(t * 9 + i) * 0.1);
+      minion.userData.pupil.position.x = -dir * 0.04;
+    } else if (run.air && run.height === ROLL) {
+      /* The mirror of the jump: instead of lifting the body over the
+         obstacle, shrink it and put it under. One full forward somersault
+         across the span, pivoting on the body centre.
+
+         The tuck envelope is deliberately NOT the rotation curve. Rotation is
+         linear in u so the turn completes exactly once; the tuck ramps in and
+         out fast and holds, so the minion is at its smallest through the
+         middle of the span — which is where z=0 is, and z=0 is where the env
+         resolves the collision. Apex and hit test coincide for the jump; the
+         deepest tuck and the hit test coincide here, for the same reason. */
+      const u = run.airT / run.airDur;
+      const tuck = Math.min(1, Math.sin(u * Math.PI) * 2.2);
+      const sx = 1 - (1 - ROLL_SX) * tuck;
+      const sy = 1 - (1 - ROLL_SY) * tuck;
+      rollPivot.scale.set(sx, sy, sx);
+      rollPivot.rotation.x = -u * Math.PI * 2;
+      minion.position.y = -rollDrop(sx, sy);
+      minion.position.z = 0;
+      minion.rotation.x = 0;
+      minion.userData.mouth.scale.setScalar(1.3);
+      /* hugging the knees — the shape that makes a ball read as a ball */
+      minion.userData.legs.forEach(l => l.rotation.x = -2.3);
+      minion.userData.arms.forEach(a => a.rotation.x = -2.7);
+      minion.userData.hair.forEach((h, i) => h.rotation.x = 0.2 + Math.sin(t * 9 + i) * 0.1);
+      minion.userData.pupil.position.x = 0;
+    } else {
+      // run cycle
+      restPosture();
+      const gait = run.travel * 0.55;
+      minion.position.y = Math.abs(Math.sin(gait)) * 0.14;
+      minion.position.z = 0;
+      minion.rotation.x = -0.07;          // lean into the direction of travel
+      minion.userData.mouth.scale.setScalar(1);
+      // stubby limbs: a smaller swing than long legs would take
+      minion.userData.legs.forEach((l, i) =>
+        l.rotation.x = Math.sin(gait + i * Math.PI) * 0.6);
+      minion.userData.arms.forEach((a, i) =>
+        a.rotation.x = Math.sin(gait + i * Math.PI + Math.PI) * 0.55);
+      minion.userData.hair.forEach((h, i) =>
+        h.rotation.x = -0.3 + Math.sin(t * 7 + i) * 0.12);
+      minion.userData.pupil.position.x = -dir * 0.06;   // body is mirrored
+    }
+
+    // camera: trails the minion, shakes on impact
+    camRig.position.x += (x * 0.55 - camRig.position.x) * Math.min(1, dt * 6);
+    camRig.position.y = run.shake * (Math.random() - 0.5) * 0.9;
+    camRig.rotation.z = run.shake * (Math.random() - 0.5) * 0.06;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+
+/* ------------------------------ wiring ----------------------------- */
+$("btn-run").onclick   = () => start((Math.random() * 1e9) | 0);
+$("btn-same").onclick  = () => start(courseSeed);
+$("btn-again").onclick = () => start(courseSeed);
+$("sp").oninput        = (e) => speedMul = +e.target.value;
+
+/* Dev hook, off unless the URL says #debug. Exposes just enough of the module
+   scope to park the simulation on a chosen frame — which is how the roll gets
+   captured for a still, since a 13-unit manoeuvre is ~0.4s at speed 1 and no
+   amount of reflexes will screenshot that reliably. Nothing in the simulation
+   reads any of this. */
+if (location.hash.includes("debug")) {
+  window.__mr = {
+    get run() { return run; },
+    get ckpt() { return ckpt; },
+    get data() { return data; },
+    set speed(v) { speedMul = v; },
+    freeze(v = true) { frozen = v; },
+    select, start, ROLL, AIR, DUCK,
+  };
+}
+
+fetch("checkpoints.json")
+  .then(r => {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  })
+  .then(j => {
+    data = j;
+    loadTrackCodes(j.track_codes);
+    buildPicker();
+    resize();
+    select(0);               // start from the untrained table
+    tick();
+  })
+  .catch(err => {
+    document.body.insertAdjacentHTML("afterbegin",
+      `<div class="panel" style="top:50%;left:50%;transform:translate(-50%,-50%);width:420px">
+         <b>Could not load checkpoints.json</b> (${err.message})<br><br>
+         Generate it and serve this folder over HTTP:<br>
+         <code class="mono">python export_checkpoints.py</code><br>
+         <code class="mono">python -m http.server -d web 8000</code>
+       </div>`);
+  });
+</script>
+</body>
+</html>
