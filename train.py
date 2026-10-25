@@ -1,8 +1,4 @@
-"""Train a Q-table on MinionRush-v4 and save it to minion_q.npy.
-
-This is the Taxi-v4 Q-learning loop, unchanged except for the gym.make string
-and a 1/n step size (see below). Run:  python train.py
-"""
+"""Train a Q-table on MinionRush-v5 and save it to minion_q.npy. See README.md."""
 
 import time
 
@@ -10,34 +6,25 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.utils.env_checker import check_env
 
-import minion_rush                          # registers MinionRush-v4
+import minion_rush                          # registers MinionRush-v5
 from minion_rush import (LANES, N_ACTIONS, N_TRACK, decode_action, exact_q,
-                         hits, index_to_track, missed_bananas, wasted_jumps)
+                         hits, index_to_track, missed_payloads, wasted_jumps)
 
-N_STATES = LANES * N_TRACK                   # 2976
-N_Q_CELLS = N_STATES * N_ACTIONS             # 44640
+N_STATES = LANES * N_TRACK
+N_Q_CELLS = N_STATES * N_ACTIONS
 
 GAMMA = 0.99
-# A 1/n step size is only an exact average once every cell has been visited,
-# and a greedy episode revisits the same argmax cells forever. So the floor on
-# exploration — not the episode count alone — is what guarantees coverage.
-# The rarest-cell visit count is roughly `episodes * MIN_EPSILON / N_Q_CELLS`,
-# and v4's pit and chasm took the table from 15390 cells to 44640, a 2.9x
-# jump. Holding that estimate at v3's ~49 means scaling the episode budget by
-# the same factor: 5M * 2.9 = 14.5M, rounded to 15M. MIN_EPSILON stays at
-# 0.15 — raising it instead would buy coverage by making the behaviour policy
-# worse, and the episode count is the cheaper knob.
 EPSILON, MIN_EPSILON, DECAY = 1.0, 0.15, 0.9999
-EPISODES = 15_000_000
+EPISODES = 33_000_000
 OUT = "minion_q.npy"
 
 
 def train(gamma=GAMMA, episodes=EPISODES, seed=0, verbose=True):
-    env = gym.make("MinionRush-v4")
+    env = gym.make("MinionRush-v5")
     rng = np.random.default_rng(seed)
 
-    Q = np.zeros((env.observation_space.n, env.action_space.n))   # (2976, 15)
-    N = np.zeros_like(Q)                                          # visit counts
+    Q = np.zeros((env.observation_space.n, env.action_space.n))
+    N = np.zeros_like(Q)
     epsilon = EPSILON
     returns = []
 
@@ -46,19 +33,13 @@ def train(gamma=GAMMA, episodes=EPISODES, seed=0, verbose=True):
         done, total = False, 0.0
 
         while not done:
-            # --- act ---
             if rng.random() < epsilon:
                 action = env.action_space.sample()
             else:
                 action = int(np.argmax(Q[state]))
 
-            # --- step ---
             next_state, reward, terminated, truncated, _ = env.step(action)
 
-            # --- learn ---
-            # A 1/n step size makes the update an exact running average. Valid
-            # here only because episodes are one step long, so there is no
-            # bootstrapping and the target is a stationary immediate reward.
             N[state, action] += 1
             alpha = 1.0 / N[state, action]
             best_next = 0.0 if terminated else np.max(Q[next_state])
@@ -80,11 +61,11 @@ def train(gamma=GAMMA, episodes=EPISODES, seed=0, verbose=True):
 
 
 def greedy_policy_is_safe(Q):
-    """Does argmax survive every one of the 2976 states?"""
     return not unsafe_states(Q)
 
 
 def unsafe_states(Q):
+    """States where greedy(Q) crashes."""
     bad = []
     for s in range(Q.shape[0]):
         lane, index = divmod(s, N_TRACK)
@@ -96,8 +77,7 @@ def unsafe_states(Q):
 
 
 if __name__ == "__main__":
-    # Validate the contract before spending any time on hyperparameters.
-    check_env(gym.make("MinionRush-v4").unwrapped)
+    check_env(gym.make("MinionRush-v5").unwrapped)
     print("check_env: OK\n")
 
     t0 = time.time()
@@ -108,7 +88,7 @@ if __name__ == "__main__":
     print(f"max |Q - exact| = {np.abs(Q - exact).max():.6f}")
     print(f"greedy policy safe in all {N_STATES} states: {greedy_policy_is_safe(Q)}")
     print(f"needless jumps/rolls in greedy policy: {len(wasted_jumps(Q))}")
-    print(f"bananas left on the table: {len(missed_bananas(Q, exact))}")
+    print(f"payloads left on the table: {len(missed_payloads(Q, exact))}")
     print(f"least-visited (state, action) cell: {int(N.min())} visits")
 
     np.save(OUT, Q)
