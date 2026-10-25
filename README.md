@@ -90,36 +90,6 @@ minion-rush-agent/
 | `=`    | chasm, a pit longer than the jump | swipe to another lane       | 11    |
 | `#`    | wall, floor to ceiling           | swipe to another lane        | 12    |
 
-A payload changes a cell's _payoff_, never its geometry — each banana and each
-bystander hits you at exactly the heights the thing underneath it does. A
-bystander is not an obstacle: he stands _on_ the cell, so `M` is only reachable
-mid-jump and `w` only mid-roll — the posture the obstacle demands and the
-posture that collects the prize are the same move. (`w` is `m` turned over, the
-way `v` is `^` turned over.)
-
-**The pit and the chasm are not new geometry either.** `o` hits you at exactly
-the heights `_` does — a roll is still ground level, so a hole swallows a
-rolling minion the same way a crate stops one. `=` hits you at exactly the
-heights `#` does. So v4 adds no answer the agent did not already know; it makes
-it learn two known answers again under two more symbols. That duplication is
-the whole cost of the version, paid on purpose for a road that looks like the
-game.
-
-**A chasm is wide along the row, never across rows.** The episode is exactly
-one row, so a hazard spanning several rows would be one the agent could never
-see the end of. A chasm is therefore drawn long but lives entirely inside one
-row's slot, with clear road at both ends — the same trick the banana bunch uses
-to be a _line_ of bananas that still belongs to a single cell. "Too long to
-jump" stays a fact about this row, decidable from this row's state.
-
-**The free exclusion is gone.** Through v3 there was exactly one impassable
-value, so exactly one unwinnable row — three walls — and numbering `#` last
-made that row exactly the top code, droppable by subtracting 1 with nothing
-renumbered. With `=` impassable too there are eight unwinnable rows scattered
-through the code space, and no numbering gathers them. The exclusion is now a
-real filter: enumerate all 2197 raw codes, keep the 2189 with at least one
-passable lane, and let the state index _that list_.
-
 ### Example
 
 Agent in lane 1 + the row ahead is `^ # B` — beam, wall, banana on a crate
